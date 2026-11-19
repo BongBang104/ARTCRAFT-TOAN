@@ -5,7 +5,9 @@
 //! `Context` are published globally by `android-activity` through `ndk-context` before the
 //! Rust `android_main` entry point runs, so they are always available here.
 
-use crate::{common::Error, ImageData};
+use crate::common::Error;
+#[cfg(feature = "image-data")]
+use crate::ImageData;
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::PathBuf;
