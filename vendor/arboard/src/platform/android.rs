@@ -153,12 +153,120 @@ impl Clipboard {
         Ok(())
     }
 
+    /// The primary clip's HTML (`ClipData.Item.getHtmlText`), as other apps (Excel, Word,
+    /// browsers, GridCraft) put a formatted copy there next to its plain text.
     pub(crate) fn get_html(&mut self, _selection: ()) -> Result<String, Error> {
-        Err(Error::ContentNotAvailable)
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+        let res = vm.attach_current_thread(|env| -> jni::errors::Result<Option<String>> {
+            let ctx_raw: jni::sys::jobject = ctx.context().cast();
+            // The context is an Android global reference owned by ndk-context: borrow it, never delete.
+            let context = unsafe { env.as_cast_raw::<JObject>(&ctx_raw)? };
+            let service_obj = JObject::from(env.new_string("clipboard")?);
+            let clipboard = env
+                .call_method(
+                    &*context,
+                    jni_str!("getSystemService"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                    &[JValue::Object(&service_obj)],
+                )?
+                .l()?;
+            if clipboard.is_null() {
+                return Ok(None);
+            }
+            let clip = env
+                .call_method(
+                    &clipboard,
+                    jni_str!("getPrimaryClip"),
+                    jni_sig!("()Landroid/content/ClipData;"),
+                    &[],
+                )?
+                .l()?;
+            if clip.is_null() {
+                return Ok(None);
+            }
+            let count = env
+                .call_method(&clip, jni_str!("getItemCount"), jni_sig!("()I"), &[])?
+                .i()?;
+            if count <= 0 {
+                return Ok(None);
+            }
+            let item = env
+                .call_method(
+                    &clip,
+                    jni_str!("getItemAt"),
+                    jni_sig!("(I)Landroid/content/ClipData$Item;"),
+                    &[JValue::Int(0)],
+                )?
+                .l()?;
+            if item.is_null() {
+                return Ok(None);
+            }
+            let html = env
+                .call_method(
+                    &item,
+                    jni_str!("getHtmlText"),
+                    jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
+                .l()?;
+            if html.is_null() {
+                return Ok(None);
+            }
+            let html = JString::cast_local(env, html)?;
+            Ok(Some(html.try_to_string(env)?))
+        });
+        res.map_err(|_| Error::ContentNotAvailable)
+            .and_then(|value| value.filter(|h| !h.trim().is_empty()).ok_or(Error::ContentNotAvailable))
     }
 
-    pub(crate) fn set_html(&mut self, _html: Cow<'_, str>, _alt: Option<Cow<'_, str>>) -> Result<(), Error> {
-        Ok(())
+    /// Put `html` on the clipboard with `alt` (or the HTML's text) as its plain-text form, through
+    /// `ClipData.newHtmlText`, so apps that only read text still get the copy.
+    pub(crate) fn set_html(&mut self, html: Cow<'_, str>, alt: Option<Cow<'_, str>>) -> Result<(), Error> {
+        let text: String = match alt {
+            Some(alt) => alt.into_owned(),
+            None => strip_tags(&html),
+        };
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+        let res = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            let ctx_raw: jni::sys::jobject = ctx.context().cast();
+            let context = unsafe { env.as_cast_raw::<JObject>(&ctx_raw)? };
+            let service_obj = JObject::from(env.new_string("clipboard")?);
+            let clipboard = env
+                .call_method(
+                    &*context,
+                    jni_str!("getSystemService"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                    &[JValue::Object(&service_obj)],
+                )?
+                .l()?;
+            if clipboard.is_null() {
+                return Ok(());
+            }
+            let label_obj = JObject::from(env.new_string("ArtCraft")?);
+            let text_obj = JObject::from(env.new_string(&*text)?);
+            let html_obj = JObject::from(env.new_string(&*html)?);
+            let clip = env
+                .call_static_method(
+                    jni_str!("android/content/ClipData"),
+                    jni_str!("newHtmlText"),
+                    jni_sig!("(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Ljava/lang/String;)Landroid/content/ClipData;"),
+                    &[JValue::Object(&label_obj), JValue::Object(&text_obj), JValue::Object(&html_obj)],
+                )?
+                .l()?;
+            if clip.is_null() {
+                return Ok(());
+            }
+            env.call_method(
+                &clipboard,
+                jni_str!("setPrimaryClip"),
+                jni_sig!("(Landroid/content/ClipData;)V"),
+                &[JValue::Object(&clip)],
+            )?;
+            Ok(())
+        });
+        res.map_err(|_| Error::ContentNotAvailable)
     }
 
     pub(crate) fn get_file_list(&mut self, _selection: ()) -> Result<Vec<PathBuf>, Error> {
@@ -189,7 +297,7 @@ impl<'clipboard> Get<'clipboard> {
     }
 
     pub(crate) fn html(self) -> Result<String, Error> {
-        Err(Error::ContentNotAvailable)
+        self.clipboard.get_html(())
     }
 
     pub(crate) fn file_list(self) -> Result<Vec<PathBuf>, Error> {
@@ -215,8 +323,8 @@ impl<'clipboard> Set<'clipboard> {
         Ok(())
     }
 
-    pub(crate) fn html(self, _html: Cow<'_, str>, _alt: Option<Cow<'_, str>>) -> Result<(), Error> {
-        Ok(())
+    pub(crate) fn html(self, html: Cow<'_, str>, alt: Option<Cow<'_, str>>) -> Result<(), Error> {
+        self.clipboard.set_html(html, alt)
     }
 
     pub(crate) fn file_list(self, _files: &[impl AsRef<std::path::Path>]) -> Result<(), Error> {
@@ -236,4 +344,25 @@ impl<'clipboard> Clear<'clipboard> {
     pub(crate) fn clear(self) -> Result<(), Error> {
         Ok(())
     }
+}
+
+/// The text of an HTML fragment for the plain-text half of a copy: tags dropped, the common
+/// entities decoded. Only used when the caller gave no text alternative.
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }

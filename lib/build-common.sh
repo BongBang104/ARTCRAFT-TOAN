@@ -3370,6 +3370,17 @@ fn saf_services(bridge: saf::Bridge, state: Arc<SafState>, inbox: SafInbox) -> S
     let open_inbox = inbox.clone();
     let print_bridge = bridge.clone_ref();
     Services {
+        // Rich clipboard through the builder's Android arboard (ClipData HTML + text): a copy
+        // carries the cells as an HTML table, so WordCraft, Word or Excel paste a real table; a
+        // paste reads another app's HTML so numbers stay numbers.
+        copy_html: Some(Box::new(|html: &str, text: &str| {
+            arboard::Clipboard::new()
+                .map_err(|e| e.to_string())?
+                .set_html(html, Some(text))
+                .map_err(|e| e.to_string())
+        })),
+        paste_html: Some(Box::new(|| arboard::Clipboard::new().ok()?.get().html().ok())),
+        paste_text: Some(Box::new(|| arboard::Clipboard::new().ok()?.get_text().ok())),
         // Android does not let an app enumerate printers: printer choice, paper, duplex, colour and
         // page range live in the system print dialog. Offer its one entry — named and defaulted so
         // File > Print's automatic selection settles on it and enables submission — and hand the
@@ -3665,6 +3676,30 @@ fn saf_services(bridge: saf::Bridge, state: Arc<SafState>, inbox: SafInbox) -> S
     let dialog_bridge = bridge.clone_ref();
     let dialog_state = Arc::clone(&state);
     Services {
+        // Rich clipboard through the builder's Android arboard (ClipData HTML + text): Paste keeps
+        // another app's formatting (a GridCraft/Excel range arrives as a table), and Copy offers
+        // HTML beside the text so other apps keep WordCraft's formatting.
+        clipboard_text: Some(Box::new(|| arboard::Clipboard::new().ok()?.get_text().ok())),
+        clipboard_html: Some(Box::new(|| arboard::Clipboard::new().ok()?.get().html().ok())),
+        set_clipboard_rich: Some(Box::new(|text: &str, html: &str, _rtf: &str, _mathml: &str| {
+            let Ok(mut clipboard) = arboard::Clipboard::new() else { return false };
+            if html.is_empty() {
+                // Nothing richer to offer: let the copy's text go through egui as usual.
+                return false;
+            }
+            clipboard.set_html(html, Some(text)).is_ok()
+        })),
+        clipboard_formats: Some(Box::new(|| {
+            let Ok(mut clipboard) = arboard::Clipboard::new() else { return Vec::new() };
+            let mut names = Vec::new();
+            if clipboard.get().html().is_ok() {
+                names.push("HTML Format".to_owned());
+            }
+            if clipboard.get_text().is_ok_and(|t| !t.is_empty()) {
+                names.push("Text".to_owned());
+            }
+            names
+        })),
         // Open / Save As / Export go through `ask_file`, which prefers this asynchronous dialog
         // (see `saf_file_dialog`): the pick runs off the frame thread, so the event loop keeps
         // pumping Android's lifecycle and the renderer swaps its surface safely around the picker.
@@ -5057,6 +5092,11 @@ try:
     # `cadcraft-io` crate to install them.
     io_dep = 'cadcraft-io = { path = "../../crates/io" }\n' if app == "cadcraft" else ''
     wordcraft_dep = 'wordcraft-fonts = { workspace = true }\nwordcraft-control-key = { workspace = true }\n' if app == "wordcraft" else ''
+    # Rich clipboard (HTML beside the text) for WordCraft and GridCraft: the shell hands the apps'
+    # copy/paste services to the builder's Android arboard (ClipData.newHtmlText / getHtmlText), so
+    # a table copied in GridCraft or Excel pastes into WordCraft as a formatted table.
+    if app in ("wordcraft", "gridcraft"):
+        wordcraft_dep += 'arboard = { workspace = true }\n'
     platform_dep = (
         'filmcraft-platform = { path = "../../crates/platform" }\n'
         'filmcraft-gpu = { path = "../../crates/gpu" }\n'

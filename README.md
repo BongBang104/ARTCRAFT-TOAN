@@ -21,6 +21,7 @@ README gốc giữ tại [`README.upstream.md`](README.upstream.md).
 - Package mặc định `com.toan.<app>` → cài song song được với bản ArtCraft khác.
 - Ký APK bằng **khoá cố định** lấy từ GitHub Secrets → bản mới cài đè (cập nhật) được lên bản cũ.
 - Thông báo cập nhật trong app trỏ về Releases của repo này.
+- **Clipboard định dạng (HTML) trên Android** cho WordCraft và GridCraft: copy vùng ô trong GridCraft/Excel → dán sang WordCraft thành bảng có định dạng; copy từ WordCraft sang app khác giữ định dạng.
 - Bỏ file rác `coiman-ide.strace` (36 MB) và 2 workflow không cần (contributors, security scan).
 
 ## Cách build trên GitHub (không cần cài gì trên máy)
