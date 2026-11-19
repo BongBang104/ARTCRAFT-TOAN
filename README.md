@@ -60,6 +60,18 @@ Cần Rust (target `aarch64-linux-android`), Android NDK 27, JDK 21, `cargo-ndk`
 - **PdfCraft** vẫn lấy từ repo gốc `storytold/pdfcraft`. Muốn sửa thì fork tương tự và thêm vào khối
   `PERSONAL_FORK_BRANCH` trong `lib/build-common.sh`.
 
+## Gõ tiếng Việt (bộ gõ Telex tích hợp)
+
+Bàn phím rời trên Android gửi phím thẳng vào app nên bộ gõ (Laban Key, Gboard…) không xử lý được;
+vì vậy app có **bộ gõ Telex riêng**, giống UniKey:
+
+- Bật/tắt: nút **VI / EN** trên thanh ribbon, hoặc nhấn-thả **Ctrl+Shift** trên bàn phím rời.
+- Quy tắc Telex: `aa â, aw ă, ee ê, oo ô, ow ơ, uw ư, w ư, dd đ`; dấu `s f r x j`, `z` xoá dấu;
+  gõ lặp để huỷ (`ass` → `as`). Đặt dấu kiểu cũ (`hòa`, `thủy`).
+- Từ không phải âm tiết tiếng Việt được giữ nguyên; từ đứng sau `=`, `(`… (công thức) không bị đổi.
+- Với bàn phím ảo: để bộ gõ ở chế độ **tiếng Anh/không dấu** để tránh gõ dấu hai lần.
+- Khi có bàn phím rời, màn hình được giữ sáng (tránh bị mờ khi đang gõ).
+
 ## Giấy phép
 
 Phần builder: MIT (xem `LICENSE`). Các app gốc: MIT OR Apache-2.0 (xem `APP_LICENSES.csv`).

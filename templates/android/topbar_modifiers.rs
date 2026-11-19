@@ -99,13 +99,16 @@ pub fn render_topbar_modifiers(ui: &mut Ui) {
     if option_env!("ARTCRAFT_NO_BUTTONS").is_some() {
         return;
     }
+    ui.spacing_mut().item_spacing.x = 6.0;
+    ui.spacing_mut().button_padding = vec2(6.0, 3.0);
+    // Vietnamese typing (built-in Telex, ARTCRAFT-TOAN) is useful with or without a keyboard, so
+    // its switch stays even when a hardware keyboard hides the modifier buttons.
+    render_telex_toggle(ui);
     if hardware_keyboard_connected() {
         // A hardware keyboard is attached: it has the modifier keys, so these buttons would only
         // get in the way.
         return;
     }
-    ui.spacing_mut().item_spacing.x = 6.0;
-    ui.spacing_mut().button_padding = vec2(6.0, 3.0);
 
     if ui.layout().prefer_right_to_left() {
         ui.add_space(4.0);
@@ -176,4 +179,34 @@ fn render_toggle_button(ui: &mut Ui, label: &str, state: &AtomicBool) -> Respons
         ui.ctx().request_repaint();
     }
     resp
+}
+
+/// The egui memory key the Android event layer (vendored egui-winit) reads for built-in Telex.
+/// Missing means on. Ctrl+Shift on a hardware keyboard flips the same key.
+const TELEX_ENABLED_KEY: &str = "artcraft.vn_telex.enabled";
+
+/// `VI` / `EN` switch for built-in Vietnamese Telex typing.
+fn render_telex_toggle(ui: &mut Ui) {
+    let id = egui::Id::NULL.with(TELEX_ENABLED_KEY);
+    let on = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+    let visuals = ui.visuals().clone();
+    let (fill, fg) = if on {
+        (visuals.selection.bg_fill, Color32::WHITE)
+    } else {
+        (Color32::TRANSPARENT, visuals.widgets.inactive.fg_stroke.color)
+    };
+    let label = WidgetText::from(if on { "VI" } else { "EN" }).color(fg);
+    let resp = ui
+        .add(
+            egui::Button::new(label)
+                .fill(fill)
+                .stroke(Stroke::NONE)
+                .corner_radius(CornerRadius::same(4))
+                .frame(on),
+        )
+        .on_hover_text("Gõ tiếng Việt (Telex) — Ctrl+Shift để bật/tắt");
+    if resp.clicked() {
+        ui.ctx().data_mut(|d| d.insert_temp(id, !on));
+        ui.ctx().request_repaint();
+    }
 }

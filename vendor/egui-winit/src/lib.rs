@@ -29,6 +29,7 @@ pub mod ime;
 #[cfg(target_os = "android")]
 pub mod open_url;
 mod pointer_icon;
+pub mod vn_telex;
 mod safe_area;
 #[cfg(target_os = "android")]
 pub mod system_theme;
@@ -37,6 +38,22 @@ mod system_theme;
 mod window_settings;
 
 pub use window_settings::{WindowGeometry, WindowSettings};
+
+/// The egui memory key that says whether built-in Vietnamese Telex typing is on (Android). The
+/// app's topbar `VI`/`EN` button reads and writes the same key, so the button and the Ctrl+Shift
+/// shortcut stay in step. Missing means on.
+pub const TELEX_ENABLED_KEY: &str = "artcraft.vn_telex.enabled";
+
+/// Whether built-in Vietnamese Telex typing is on.
+pub fn telex_enabled(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::NULL.with(TELEX_ENABLED_KEY)))
+        .unwrap_or(true)
+}
+
+/// Turn built-in Vietnamese Telex typing on or off.
+pub fn set_telex_enabled(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(TELEX_ENABLED_KEY), on));
+}
 
 use raw_window_handle::HasDisplayHandle;
 
@@ -198,6 +215,11 @@ pub struct State {
 
     clipboard: clipboard::Clipboard,
 
+    /// Built-in Vietnamese Telex typing (Android): see [`vn_telex`].
+    telex: vn_telex::Telex,
+    /// Ctrl+Shift went down together with no other key yet: releasing them toggles Telex.
+    telex_chord: bool,
+
     /// If `true`, mouse inputs will be treated as touches.
     /// Useful for debugging touch support in egui.
     ///
@@ -280,6 +302,9 @@ impl State {
             clipboard: clipboard::Clipboard::new(
                 display_target.display_handle().ok().map(|h| h.as_raw()),
             ),
+
+            telex: vn_telex::Telex::new(),
+            telex_chord: false,
 
             simulate_touch_screen: false,
             pointer_touch_id: None,
@@ -397,8 +422,13 @@ impl State {
             if self.allow_ime {
                 self.egui_ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
+            let telex_on = telex_enabled(&self.egui_ctx);
+            if telex_on != self.telex.enabled() {
+                self.telex.set_enabled(telex_on);
+            }
             for ev in crate::ime::android::poll_all_ime_events() {
                 if ev == "\x08" {
+                    self.telex.backspace();
                     self.egui_input.events.push(egui::Event::Key {
                         key: egui::Key::Backspace,
                         physical_key: Some(egui::Key::Backspace),
@@ -414,6 +444,7 @@ impl State {
                         modifiers: self.modifiers,
                     });
                 } else if ev == "\n" {
+                    self.telex.reset();
                     self.egui_input.events.push(egui::Event::Key {
                         key: egui::Key::Enter,
                         physical_key: Some(egui::Key::Enter),
@@ -430,7 +461,8 @@ impl State {
                     });
                     self.egui_input.events.push(egui::Event::Text("\n".to_string()));
                 } else {
-                    self.egui_input.events.push(egui::Event::Text(ev));
+                    let edit = self.telex.feed_str(&ev);
+                    self.push_telex_edit(edit);
                 }
             }
         }
@@ -544,6 +576,9 @@ impl State {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if *state == ElementState::Pressed {
+                    self.telex.reset();
+                }
                 self.on_mouse_button_input(*state, *button);
                 EventResponse {
                     repaint: true,
@@ -574,6 +609,9 @@ impl State {
             }
             // WindowEvent::TouchpadPressure {device_id, pressure, stage, ..  } => {} // TODO(emilk)
             WindowEvent::Touch(touch) => {
+                if touch.phase == winit::event::TouchPhase::Started {
+                    self.telex.reset();
+                }
                 self.on_touch(window, touch);
                 let consumed = match touch.phase {
                     winit::event::TouchPhase::Started
@@ -643,6 +681,8 @@ impl State {
                 };
 
                 self.egui_input.focused = focused;
+                self.telex.reset();
+                self.telex_chord = false;
                 if !focused {
                     // Avoid sticky modifiers when focus is lost (egui clears its own copy too).
                     self.modifiers = egui::Modifiers::default();
@@ -710,6 +750,28 @@ impl State {
                 self.egui_input
                     .events
                     .push(egui::Event::ModifiersChanged(self.modifiers));
+
+                // Ctrl+Shift pressed and released on their own toggles Vietnamese typing, the
+                // UniKey shortcut.
+                if cfg!(target_os = "android") {
+                    if ctrl && shift && !alt {
+                        self.telex_chord = true;
+                    } else if !ctrl && !shift && !alt {
+                        if std::mem::take(&mut self.telex_chord) {
+                            let on = !telex_enabled(&self.egui_ctx);
+                            set_telex_enabled(&self.egui_ctx, on);
+                            self.telex.set_enabled(on);
+                            #[cfg(target_os = "android")]
+                            crate::ime::android::show_toast(if on {
+                                "Gõ tiếng Việt (Telex): BẬT"
+                            } else {
+                                "Gõ tiếng Việt: TẮT"
+                            });
+                        }
+                    } else if alt {
+                        self.telex_chord = false;
+                    }
+                }
 
                 EventResponse {
                     repaint: true,
@@ -1432,6 +1494,24 @@ impl State {
         }
     }
 
+    /// Apply a Telex edit: Backspaces for the letters it rewrites, then the new text.
+    fn push_telex_edit(&mut self, edit: vn_telex::Edit) {
+        for _ in 0..edit.backspaces {
+            for pressed in [true, false] {
+                self.egui_input.events.push(egui::Event::Key {
+                    key: egui::Key::Backspace,
+                    physical_key: Some(egui::Key::Backspace),
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                });
+            }
+        }
+        if !edit.insert.is_empty() {
+            self.egui_input.events.push(egui::Event::Text(edit.insert));
+        }
+    }
+
     fn on_keyboard_input(&mut self, event: &winit::event::KeyEvent) {
         let winit::event::KeyEvent {
             // Represents the position of a key independent of the currently active layout.
@@ -1483,6 +1563,31 @@ impl State {
         // See also: https://github.com/emilk/egui/issues/3653
         if let Some(active_key) = logical_key.or(physical_key) {
             if pressed {
+                // Any real key ends a Ctrl+Shift tap; keys that move the caret end the word.
+                self.telex_chord = false;
+                if active_key == egui::Key::Backspace && !self.modifiers.ctrl && !self.modifiers.alt {
+                    self.telex.backspace();
+                } else if self.modifiers.ctrl
+                    || self.modifiers.alt
+                    || self.modifiers.command
+                    || matches!(
+                        active_key,
+                        egui::Key::ArrowLeft
+                            | egui::Key::ArrowRight
+                            | egui::Key::ArrowUp
+                            | egui::Key::ArrowDown
+                            | egui::Key::Home
+                            | egui::Key::End
+                            | egui::Key::PageUp
+                            | egui::Key::PageDown
+                            | egui::Key::Enter
+                            | egui::Key::Tab
+                            | egui::Key::Escape
+                            | egui::Key::Delete
+                    )
+                {
+                    self.telex.reset();
+                }
                 if is_cut_command(self.modifiers, active_key) {
                     self.egui_input.events.push(egui::Event::Cut);
                     return;
@@ -1524,9 +1629,14 @@ impl State {
                 let is_cmd =
                     self.modifiers.ctrl || self.modifiers.command || self.modifiers.mac_cmd;
                 if pressed && !is_cmd {
-                    self.egui_input
-                        .events
-                        .push(egui::Event::Text(text.to_owned()));
+                    if cfg!(target_os = "android") {
+                        let edit = self.telex.feed_str(text);
+                        self.push_telex_edit(edit);
+                    } else {
+                        self.egui_input
+                            .events
+                            .push(egui::Event::Text(text.to_owned()));
+                    }
                 }
             }
         }

@@ -717,6 +717,7 @@ public final class __CLASS__ extends NativeActivity {
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         refreshWindowInsets();
+        updateKeepScreenOn(newConfig);
         int uiMode = newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK;
         boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
         Log.i(TAG, "System theme changed: " + (isDark ? "dark" : "light"));
@@ -830,6 +831,39 @@ public final class __CLASS__ extends NativeActivity {
     protected void onResume() {
         super.onResume();
         suppressSelectionHandles();
+        updateKeepScreenOn(getResources().getConfiguration());
+    }
+
+    /**
+     * Keep the screen on while a hardware keyboard is attached. Its keys go straight to the native
+     * event loop, and on some devices (Samsung tablets) typing on it did not count as user
+     * activity: the screen dimmed in the middle of a sentence until it was touched, and the key
+     * that woke it was lost. Without a keyboard the normal screen timeout applies.
+     */
+    private void updateKeepScreenOn(Configuration config) {
+        try {
+            Window window = getWindow();
+            if (window == null || config == null) return;
+            boolean hardKeyboard = config.keyboard != Configuration.KEYBOARD_NOKEYS
+                    && config.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO;
+            if (hardKeyboard) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not update keep-screen-on", error);
+        }
+    }
+
+    /** A short message from the Rust side, e.g. built-in Vietnamese typing switched on or off. */
+    public void showToast(String message) {
+        if (message == null || message.isEmpty()) return;
+        runOnUiThread(() -> {
+            try {
+                android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show();
+            } catch (Throwable ignored) {}
+        });
     }
 
     private void extractAssetsIfNeeded() {
