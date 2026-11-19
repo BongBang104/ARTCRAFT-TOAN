@@ -4,8 +4,8 @@ Build Android (APK) cá nhân cho 3 ứng dụng:
 
 | App | Package | Mã nguồn gốc |
 |---|---|---|
-| WordCraft | `com.toan.wordcraft` | https://github.com/storytold/wordcraft |
-| GridCraft | `com.toan.gridcraft` | https://github.com/storytold/gridcraft |
+| WordCraft | `com.toan.wordcraft` | Fork riêng: https://github.com/BongBang104/wordcraft (nhánh `toan`) |
+| GridCraft | `com.toan.gridcraft` | Fork riêng: https://github.com/BongBang104/gridcraft (nhánh `toan`) |
 | PdfCraft | `com.toan.pdfcraft` | https://github.com/storytold/pdfcraft |
 
 Dựa trên hệ thống build của [MostafaXS1/artcraft-android](https://github.com/MostafaXS1/artcraft-android) (MIT).
@@ -53,8 +53,11 @@ Cần Rust (target `aarch64-linux-android`), Android NDK 27, JDK 21, `cargo-ndk`
 
 ## Phát triển tính năng riêng
 
-Muốn sửa chính app (không chỉ phần Android): fork repo gốc của app (ví dụ `storytold/wordcraft`),
-rồi trỏ biến `REPO` / `APP_ORIGIN` trong `lib/build-common.sh` (khoảng dòng 178) sang fork đó.
+- **WordCraft, GridCraft** build từ fork riêng, nhánh **`toan`** (tách từ bản ổn định WordCraft v0.18.1, GridCraft v0.19.1).
+  Sửa tính năng = commit vào nhánh `toan` của fork, rồi build lại ở repo này.
+  Chọn `source_version: stable` khi chạy workflow = build nhánh `toan`; `main` = bản mới nhất của fork.
+- **PdfCraft** vẫn lấy từ repo gốc `storytold/pdfcraft`. Muốn sửa thì fork tương tự và thêm vào khối
+  `PERSONAL_FORK_BRANCH` trong `lib/build-common.sh`.
 
 ## Giấy phép
 

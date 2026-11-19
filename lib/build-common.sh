@@ -231,6 +231,16 @@ elif [[ "$APP" == "coimanide" ]]; then
     APP_ORIGIN="https://github.com/ManuelCoimbra/coiman-ide"
 fi
 
+# Personal forks (ARTCRAFT-TOAN): these apps build from BongBang104's fork, branch `toan`,
+# which carries the personal feature changes on top of an upstream stable tag.
+PERSONAL_FORK_BRANCH="toan"
+case "$APP" in
+    wordcraft|gridcraft)
+        REPO="https://github.com/BongBang104/$APP.git"
+        APP_ORIGIN="https://github.com/BongBang104/$APP"
+        ;;
+esac
+
 # The builder's own version, baked into every APK. The app compares it with the latest GitHub
 # release of this repository on launch and offers the download when GitHub has a newer one
 # (see templates/android/UpdateCheck.java). Bump it when a release is published.
@@ -570,6 +580,15 @@ case "$APP" in
     earthcraft|prowave|transit|rustgis|mapcraft|anicraft)
         if [[ "$BUILD_SOURCE" == "stable" ]]; then
             BUILD_SOURCE="main"
+        fi
+        ;;
+esac
+
+# Personal forks have no release tags: "stable" means the personal branch.
+case "$APP" in
+    wordcraft|gridcraft)
+        if [[ "$BUILD_SOURCE" == "stable" ]]; then
+            BUILD_SOURCE="$PERSONAL_FORK_BRANCH"
         fi
         ;;
 esac
