@@ -1328,7 +1328,18 @@ public final class __CLASS__ extends NativeActivity {
         String clean = name.replace('\\', '/');
         int slash = clean.lastIndexOf('/');
         if (slash >= 0) clean = clean.substring(slash + 1);
-        clean = clean.replaceAll("[^A-Za-z0-9._() -]", "_").trim();
+        // Keep letters of every language (Vietnamese names stay readable: "Báo cáo.docx", not
+        // "B_o c_o.docx"); only characters file systems refuse, and control characters, go.
+        clean = java.text.Normalizer.normalize(clean, java.text.Normalizer.Form.NFC);
+        clean = clean.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_").trim();
+        // File names are capped at 255 bytes, and Vietnamese letters take up to 3 in UTF-8.
+        if (clean.codePointCount(0, clean.length()) > 80) {
+            int dot = clean.lastIndexOf('.');
+            String ext = (dot > 0 && clean.length() - dot <= 8) ? clean.substring(dot) : "";
+            String base = ext.isEmpty() ? clean : clean.substring(0, dot);
+            base = base.substring(0, base.offsetByCodePoints(0, Math.min(72, base.codePointCount(0, base.length()))));
+            clean = base.trim() + ext;
+        }
         if (clean.isEmpty() || clean.equals(".") || clean.equals("..")) return "untitled";
         return clean;
     }
@@ -1531,18 +1542,100 @@ public final class __CLASS__ extends NativeActivity {
                     out.write(pdf);
                 }
                 final int pageCount = countPdfPages(file);
-                runOnUiThread(() -> {
-                    try {
-                        manager.print(jobName, new PdfPrintAdapter(file, jobName, pageCount), null);
-                    } catch (Throwable error) {
-                        Log.e(TAG, "Could not open the Android print dialog", error);
-                    }
-                });
+                runOnUiThread(() -> choosePrintRoute(manager, file, jobName, pageCount));
             } catch (Throwable error) {
                 Log.e(TAG, "Could not stage the PDF for printing", error);
             }
         });
         return "OK";
+    }
+
+    /**
+     * Ask how to print. The Android print system only reaches printers a print service can see
+     * (Wi-Fi/network ones, or a vendor plugin): a USB-only printer such as a Canon G1010 never
+     * shows up there, only "Save as PDF". Printing apps like NokoPrint or Canon PRINT reach those
+     * printers when they are handed the PDF, so that is offered too.
+     */
+    private void choosePrintRoute(PrintManager manager, File file, String jobName, int pageCount) {
+        String[] routes = {
+            "Dịch vụ in Android (máy in Wi-Fi / plugin)",
+            "Gửi PDF sang ứng dụng in (NokoPrint, Canon PRINT…)",
+        };
+        try {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("In tài liệu")
+                    .setItems(routes, (dialog, which) -> {
+                        if (which == 0) {
+                            try {
+                                manager.print(jobName, new PdfPrintAdapter(file, jobName, pageCount), null);
+                            } catch (Throwable error) {
+                                Log.e(TAG, "Could not open the Android print dialog", error);
+                            }
+                        } else {
+                            io.execute(() -> sharePdfToPrinterApp(file, jobName));
+                        }
+                    })
+                    .setNegativeButton("Hủy", null)
+                    .show();
+        } catch (Throwable error) {
+            Log.e(TAG, "Could not show the print choice; using the Android print dialog", error);
+            try {
+                manager.print(jobName, new PdfPrintAdapter(file, jobName, pageCount), null);
+            } catch (Throwable inner) {
+                Log.e(TAG, "Could not open the Android print dialog", inner);
+            }
+        }
+    }
+
+    /**
+     * Copy the print PDF into Downloads (MediaStore, Android 10+, so the receiving app can read it
+     * and the user keeps a copy) and open the share sheet so a printing app can take it.
+     */
+    private void sharePdfToPrinterApp(File file, String jobName) {
+        try {
+            if (Build.VERSION.SDK_INT < 29) {
+                showToast("Cần Android 10 trở lên để gửi PDF sang ứng dụng in");
+                return;
+            }
+            String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT)
+                    .format(new java.util.Date());
+            String base = jobName.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+            if (base.isEmpty()) base = "Document";
+            android.content.ContentValues values = new android.content.ContentValues();
+            values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, base + "-in-" + stamp + ".pdf");
+            values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/pdf");
+            values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/ArtCraft");
+            Uri uri = getContentResolver().insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) {
+                showToast("Không tạo được file PDF để in");
+                return;
+            }
+            try (OutputStream out = getContentResolver().openOutputStream(uri);
+                    FileInputStream in = new FileInputStream(file)) {
+                if (out == null) throw new java.io.IOException("no output stream");
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            }
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("application/pdf");
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.setClipData(ClipData.newRawUri(jobName, uri));
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent chooser = Intent.createChooser(send, "In bằng ứng dụng…");
+            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            runOnUiThread(() -> {
+                try {
+                    startActivity(chooser);
+                } catch (Throwable error) {
+                    Log.e(TAG, "No app can take the print PDF", error);
+                    showToast("Không có ứng dụng nào nhận PDF. File đã lưu ở Download/ArtCraft");
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "Could not hand the PDF to a printing app", error);
+            showToast("Không gửi được PDF sang ứng dụng in");
+        }
     }
 
     /** Page count from the system's own PDF parser; feeds PrintDocumentInfo below. */
