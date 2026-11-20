@@ -208,6 +208,7 @@ public final class __CLASS__ extends NativeActivity {
                             if (child != inputView) {
                                 child.setFocusable(true);
                                 child.setFocusableInTouchMode(true);
+                                disableFocusHighlight(child);
                                 child.requestFocus();
                                 break;
                             }
@@ -216,6 +217,23 @@ public final class __CLASS__ extends NativeActivity {
                 }
             } catch (Throwable ignored) {}
         });
+    }
+
+    /**
+     * Turn off Android's default focus highlight (API 26+) on the app's views. The full-screen
+     * native view takes focus whenever the soft keyboard hides, and once a hardware keyboard is
+     * typed on the device leaves touch mode and draws that highlight: a translucent grey layer
+     * over the whole app ("the screen goes dim while typing until I touch it").
+     */
+    private void disableFocusHighlight(View view) {
+        if (view == null || android.os.Build.VERSION.SDK_INT < 26) return;
+        try {
+            view.setDefaultFocusHighlightEnabled(false);
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) disableFocusHighlight(group.getChildAt(i));
+            }
+        } catch (Throwable ignored) {}
     }
 
     private void installInputView() {
@@ -227,6 +245,7 @@ public final class __CLASS__ extends NativeActivity {
             if (content != null && inputView == null) {
                 inputView = new ArtCraftInputView(this);
                 content.addView(inputView, new ViewGroup.LayoutParams(1, 1));
+                disableFocusHighlight(window.getDecorView());
                 inputView.setVisibility(View.GONE);
                 inputView.setFocusable(false);
                 inputView.setFocusableInTouchMode(false);

@@ -99,6 +99,21 @@ struct PendingPointerDown {
     location: winit::dpi::PhysicalPosition<f64>,
 }
 
+/// A one-finger swipe that scrolls instead of dragging (ARTCRAFT-TOAN): the finger, and where it
+/// was at the last scroll step.
+#[derive(Clone, Copy, Debug)]
+struct TouchPan {
+    touch_id: u64,
+    last: winit::dpi::PhysicalPosition<f64>,
+}
+
+/// egui memory key where an app publishes the screen rectangle (in points) in which a one-finger
+/// swipe scrolls rather than drags, with the pass it was published in: `(egui::Rect, u64)`.
+/// WordCraft sets it to its document canvas, so swiping the page scrolls it as in mobile word
+/// processors, while a tap still places the caret, a double tap selects a word and a stylus
+/// still drags to select.
+pub const TOUCH_PAN_RECT_KEY: &str = "artcraft.touch_pan_rect";
+
 /// Movement (in physical pixels) that turns a finger that stayed still into a drag.
 const POINTER_DOWN_SLOP_PX: f64 = 20.0;
 
@@ -246,6 +261,8 @@ pub struct State {
     hold_to_right_click: Option<HoldToRightClick>,
 
     pending_pointer_down: Option<PendingPointerDown>,
+    /// The one-finger swipe currently scrolling, if any.
+    touch_pan: Option<TouchPan>,
     /// Where a press committed this frame was anchored. egui hit-tests a press at the last
     /// pointer position in the frame, so moves that arrive after the press would otherwise
     /// hit whatever lies under the finger now instead of the pressed widget. The pointer is
@@ -311,6 +328,7 @@ impl State {
             gesture_touch_ids: Vec::new(),
             hold_to_right_click: None,
             pending_pointer_down: None,
+            touch_pan: None,
             press_origin_repin: None,
             gesture_was_multi_finger: false,
             clipboard_shortcuts: true,
@@ -1327,6 +1345,9 @@ impl State {
         // press, click, or drag any UI element underneath. Cancel any pending or active
         // pointer press immediately without emitting a click!
         if self.gesture_touch_ids.len() > 1 || self.gesture_was_multi_finger {
+            if self.touch_pan.take().is_some() {
+                self.push_pan_wheel(egui::Vec2::ZERO, egui::TouchPhase::Cancel);
+            }
             self.pending_pointer_down = None;
             self.hold_to_right_click = None;
             if self.pointer_touch_id.is_some() {
@@ -1335,6 +1356,31 @@ impl State {
                 self.egui_input.events.push(egui::Event::PointerGone);
             }
             return;
+        }
+
+        if let Some(pan) = self.touch_pan {
+            if pan.touch_id == touch.id {
+                let ppp = pixels_per_point;
+                match touch.phase {
+                    winit::event::TouchPhase::Moved => {
+                        let delta = egui::vec2(
+                            (touch.location.x - pan.last.x) as f32 / ppp,
+                            (touch.location.y - pan.last.y) as f32 / ppp,
+                        );
+                        self.touch_pan = Some(TouchPan { touch_id: pan.touch_id, last: touch.location });
+                        self.on_cursor_moved(window, touch.location);
+                        self.push_pan_wheel(delta, egui::TouchPhase::Move);
+                    }
+                    winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => {
+                        self.touch_pan = None;
+                        self.push_pan_wheel(egui::Vec2::ZERO, egui::TouchPhase::End);
+                        self.pointer_pos_in_points = None;
+                        self.egui_input.events.push(egui::Event::PointerGone);
+                    }
+                    winit::event::TouchPhase::Started => {}
+                }
+                return;
+            }
         }
 
         let is_stylus = (touch.id & (1u64 << 32)) != 0;
@@ -1401,6 +1447,18 @@ impl State {
                         let dx = touch.location.x - pending.location.x;
                         let dy = touch.location.y - pending.location.y;
                         if (dx * dx + dy * dy) > POINTER_DOWN_SLOP_PX * POINTER_DOWN_SLOP_PX {
+                            if self.in_touch_pan_region(window, pending.location) {
+                                // A swipe on the page scrolls it: no press, no selection drag.
+                                self.pending_pointer_down = None;
+                                self.hold_to_right_click = None;
+                                self.touch_pan = Some(TouchPan { touch_id: pending.touch_id, last: touch.location });
+                                let ppp = pixels_per_point;
+                                self.push_pan_wheel(
+                                    egui::vec2(dx as f32 / ppp, dy as f32 / ppp),
+                                    egui::TouchPhase::Start,
+                                );
+                                return;
+                            }
                             self.commit_pending_pointer_down(window);
                         }
                     }
@@ -1492,6 +1550,35 @@ impl State {
                 modifiers,
             });
         }
+    }
+
+    /// Whether a finger that went down at `location` (physical pixels) is inside the rectangle the
+    /// app published for one-finger scrolling this frame or the last few.
+    fn in_touch_pan_region(&self, window: &Window, location: winit::dpi::PhysicalPosition<f64>) -> bool {
+        let Some((rect, pass)) = self
+            .egui_ctx
+            .data(|d| d.get_temp::<(egui::Rect, u64)>(egui::Id::NULL.with(TOUCH_PAN_RECT_KEY)))
+        else {
+            return false;
+        };
+        if self.egui_ctx.cumulative_pass_nr().saturating_sub(pass) > 3 {
+            return false;
+        }
+        let ppp = pixels_per_point(&self.egui_ctx, window);
+        rect.contains(egui::pos2(location.x as f32 / ppp, location.y as f32 / ppp))
+    }
+
+    /// One step of a one-finger swipe, as the touchpad-style scroll the canvas already handles
+    /// (1:1 movement, and a fling when the finger lifts while moving).
+    fn push_pan_wheel(&mut self, delta: egui::Vec2, phase: egui::TouchPhase) {
+        self.egui_input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase,
+            source: egui::MouseWheelSource::Trackpad,
+            modifiers: egui::Modifiers::default(),
+        });
+        self.egui_ctx.request_repaint();
     }
 
     /// Apply a Telex edit: Backspaces for the letters it rewrites, then the new text.
