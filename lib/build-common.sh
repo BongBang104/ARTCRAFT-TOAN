@@ -4291,14 +4291,13 @@ INTENT_OPEN = {
             log::error!("Could not open the incoming file {path}: {error}");
         }
 ''',
-    "gridcraft": '''        match std::fs::read(path) {
-            Ok(bytes) => self.saf_inbox.lock().unwrap().push((saf::picker_name(path), bytes)),
-            Err(error) => log::error!("Could not read the incoming file {path}: {error}"),
-        }
+    # Opened by its staged path, not as name+bytes: a document opened from bytes only knows its
+    # file name, so Save wrote to "/name.xlsx" ("Read-only file system", os error 30) and the
+    # staged copy, which is what goes back to the original, never changed.
+    "gridcraft": '''        self.inner.open_path(path);
 ''',
-    "wordcraft": '''        match std::fs::read(path) {
-            Ok(bytes) => self.saf_inbox.lock().unwrap().push((saf::picker_name(path), bytes)),
-            Err(error) => log::error!("Could not read the incoming file {path}: {error}"),
+    "wordcraft": '''        if let Err(error) = self.inner.open_from_platform(path, None) {
+            log::error!("Could not open the incoming file {path}: {error}");
         }
 ''',
     "cadcraft": '''        self.inner.open_path(std::path::Path::new(path));
