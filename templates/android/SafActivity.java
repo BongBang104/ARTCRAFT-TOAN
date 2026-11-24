@@ -1238,6 +1238,11 @@ public final class __CLASS__ extends NativeActivity {
      * will be reflected in the document size.</p>
      */
     public String safCommit(String path) {
+        // A file opened from another app ("Open with" in My Files, Zalo…) usually comes with a
+        // read-only grant, so writing back through its URI fails. When the original is a real
+        // file on the device and the app has "All files access", write the original directly.
+        String real = getSharedPreferences(PREFS, MODE_PRIVATE).getString("real:" + path, null);
+        if (real != null && writeRealFile(new File(path), new File(real))) return "OK";
         try {
             String uriText = getSharedPreferences(PREFS, MODE_PRIVATE).getString("uri:" + path, null);
             if (uriText == null) uriText = uriForSibling(path);
@@ -1255,8 +1260,130 @@ public final class __CLASS__ extends NativeActivity {
             return "OK";
         } catch (Exception e) {
             Log.e(TAG, "Could not write a selected document", e);
+            warnNotWrittenBack(path, real != null);
             return "ERROR: Could not write the selected document: " + e.getMessage();
         }
+    }
+
+    /** Paths already warned about, so a document that autosaves doesn't toast on every save. */
+    private final java.util.Set<String> warnedNotWrittenBack = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    private void warnNotWrittenBack(String path, boolean knowsOriginal) {
+        if (!warnedNotWrittenBack.add(path)) return;
+        boolean allFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager();
+        String why = knowsOriginal && !allFiles
+                ? "Hãy bật \"Truy cập mọi tệp\" cho ứng dụng trong Cài đặt rồi lưu lại."
+                : "Ứng dụng đã mở file chỉ cho quyền đọc. Dùng Lưu thành… để chọn nơi lưu, hoặc mở file bằng nút Mở trong ứng dụng.";
+        showToast("Chưa ghi được vào file gốc. " + why);
+    }
+
+    /**
+     * Copy the staged working copy over the original file. Only when the app may write there
+     * (All files access) and the original still exists; written to a sibling temporary file and
+     * renamed so a failure never leaves the original half written.
+     */
+    private boolean writeRealFile(File staged, File original) {
+        try {
+            if (!staged.isFile() || !original.isFile()) return false;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) return false;
+            File parent = original.getParentFile();
+            if (parent == null || !original.canWrite()) return false;
+            File temp = new File(parent, "." + original.getName() + ".artcraft-save");
+            try (FileInputStream in = new FileInputStream(staged); FileOutputStream out = new FileOutputStream(temp)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                out.getFD().sync();
+            }
+            if (!temp.renameTo(original)) {
+                // Some storage refuses the rename: write in place instead.
+                try (FileInputStream in = new FileInputStream(staged); FileOutputStream out = new FileOutputStream(original, false)) {
+                    byte[] buffer = new byte[64 * 1024];
+                    int count;
+                    while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                    out.getFD().sync();
+                }
+                temp.delete();
+            }
+            Log.i(TAG, "Saved back to the original file " + original);
+            return true;
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not write the original file " + original, error);
+            return false;
+        }
+    }
+
+    /**
+     * Find the device file behind a URI another app handed over, and remember it for the staged
+     * copy. A candidate counts only when it exists with the same name and size as the copy, so a
+     * wrong guess is never written to.
+     */
+    private void rememberRealFile(File stage, Uri uri) {
+        try {
+            String name = displayName(uri);
+            for (String candidate : realPathCandidates(uri)) {
+                if (candidate == null) continue;
+                File file = new File(candidate);
+                if (file.isFile() && file.length() == stage.length()
+                        && (name == null || file.getName().equals(name) || safeName(file.getName()).equals(stage.getName()))) {
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("real:" + stage.getAbsolutePath(), file.getAbsolutePath()).commit();
+                    Log.i(TAG, "Opened file is " + file);
+                    return;
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not find the device file behind " + uri, error);
+        }
+    }
+
+    /** The first device file behind `uri` that exists under the same name, if any. */
+    private String existingRealPath(Uri uri, String name) {
+        try {
+            for (String candidate : realPathCandidates(uri)) {
+                if (candidate == null) continue;
+                File file = new File(candidate);
+                if (file.isFile() && (name == null || file.getName().equals(name))) return file.getAbsolutePath();
+            }
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    private List<String> realPathCandidates(Uri uri) {
+        List<String> out = new ArrayList<>();
+        String root = Environment.getExternalStorageDirectory().getAbsolutePath();
+        if ("file".equals(uri.getScheme())) out.add(uri.getPath());
+        // Storage documents: "primary:Download/x.docx" or "1234-ABCD:Documents/x.docx".
+        try {
+            if (android.provider.DocumentsContract.isDocumentUri(this, uri)) {
+                String id = android.provider.DocumentsContract.getDocumentId(uri);
+                int colon = id.indexOf(':');
+                if (colon > 0) {
+                    String volume = id.substring(0, colon);
+                    String rest = id.substring(colon + 1);
+                    out.add(("primary".equalsIgnoreCase(volume) ? root : "/storage/" + volume) + "/" + rest);
+                } else if (id.startsWith("/")) {
+                    out.add(id);
+                }
+            }
+        } catch (Throwable ignored) { }
+        // MediaStore and many file managers still answer the _data column.
+        try (android.database.Cursor c = getContentResolver().query(uri, new String[] {"_data"}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) out.add(c.getString(0));
+        } catch (Throwable ignored) { }
+        // File managers' own providers usually carry the path in the URI
+        // (".../device_storage/0/Download/x.docx", ".../root/storage/emulated/0/...").
+        String path = uri.getPath();
+        if (path != null) {
+            int at = path.indexOf("/storage/");
+            if (at >= 0) out.add(path.substring(at));
+            String[] parts = path.split("/");
+            for (int i = 1; i < parts.length; i++) {
+                StringBuilder tail = new StringBuilder();
+                for (int j = i; j < parts.length; j++) tail.append('/').append(parts[j]);
+                out.add(root + tail);
+            }
+        }
+        return out;
     }
 
     /** The staged path's stem, ignoring any extension: {@code …/media/Book.xlsx} → {@code …/media/Book}. */
@@ -1380,11 +1507,16 @@ public final class __CLASS__ extends NativeActivity {
         if (dot > 0) { stem = safe.substring(0, dot); extension = safe.substring(dot); }
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String owner = uri == null ? null : uri.toString();
+        // The same device file opened again ("Open with" hands a new URI every time) reuses its
+        // working copy instead of becoming "name (2).docx".
+        String realOwner = uri == null ? null : existingRealPath(uri, name);
         for (int attempt = 1; attempt <= 10000; attempt++) {
             String candidate = attempt == 1 ? safe : stem + " (" + attempt + ")" + extension;
             File file = new File(dir, candidate);
             String mapped = prefs.getString("uri:" + file.getAbsolutePath(), null);
-            if (mapped == null || mapped.equals(owner) || !file.exists()) return file;
+            String mappedReal = prefs.getString("real:" + file.getAbsolutePath(), null);
+            if (mapped == null || mapped.equals(owner) || !file.exists()
+                    || (realOwner != null && realOwner.equals(mappedReal))) return file;
         }
         throw new Exception("Could not find a free name for the selected document in " + dir);
     }
@@ -1507,6 +1639,7 @@ public final class __CLASS__ extends NativeActivity {
                     File stage = newStageFile(displayName(uri), uri);
                     copyUriToFile(uri, stage);
                     rememberUri(stage, uri);
+                    rememberRealFile(stage, uri);
                     intentPaths.offer(stage.getAbsolutePath());
                 } catch (Exception e) {
                     Log.e(TAG, "Could not open the file the system handed the app: " + uri, e);
